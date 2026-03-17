@@ -1,6 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() => runApp(const MyApp());
 
@@ -91,7 +96,7 @@ class _EscalaPageState extends State<EscalaPage> {
 
   String tono = "C";
   int _tab = 0;
-  bool _isMinor = false;  // ← toggle Mayor / Menor
+  bool _isMinor = false;
 
   List<Map<String,String>> escalaActual    = [];
   List<Map<String,String>> progresionActual = [];
@@ -111,7 +116,6 @@ class _EscalaPageState extends State<EscalaPage> {
   bool   transpVisible = false;
   String transpError   = "";
 
-  // ── LÓGICA ──
   void mostrarEscala() {
     final qualities = _isMinor ? kQualitiesMinor : kQualities;
     final esc = generarEscala(tono, minor: _isMinor);
@@ -218,7 +222,6 @@ class _EscalaPageState extends State<EscalaPage> {
     return {"nota": nota, "tipo": tipo};
   }
 
-  // ── BUILD ──
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -227,7 +230,6 @@ class _EscalaPageState extends State<EscalaPage> {
         centerTitle: true,
         title: const Text("🎸 ACOUSTIC GUITAR",
           style: TextStyle(color: Color(0xFFE8C547), fontWeight: FontWeight.bold, letterSpacing: 3, fontSize: 16)),
-        // ── SONG BOOK BUTTON ──
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 10),
@@ -271,7 +273,6 @@ class _EscalaPageState extends State<EscalaPage> {
       Row(children: [
         const Text("TONALIDAD", style: TextStyle(color: Color(0xFF7A7568), fontSize: 9, letterSpacing: 3)),
         const SizedBox(width: 10),
-        // ── BADGE MODO ──
         AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -349,8 +350,6 @@ class _EscalaPageState extends State<EscalaPage> {
     final modeName = _isMinor ? "MENOR" : "MAYOR";
     final modeLabel = _isMinor ? "menor" : "mayor";
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-
-      // ── Toggle Mayor / Menor ──
       Container(
         decoration: BoxDecoration(
           color: const Color(0xFF1A1A1A),
@@ -390,10 +389,8 @@ class _EscalaPageState extends State<EscalaPage> {
           )),
         ]),
       ),
-
       const SizedBox(height: 12),
       _boton("GENERAR ESCALA $modeName DE $tono", mostrarEscala, primary: !_isMinor),
-
       if (escalaVisible) ...[
         const SizedBox(height: 20),
         _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -709,6 +706,8 @@ class _SongBookPageState extends State<SongBookPage> {
   String searchQuery = '';
   String filterTone  = '';
   int? expandedId;
+  bool _isExporting = false;
+  bool _isImporting = false;
 
   @override
   void initState() { super.initState(); _loadSongs(); }
@@ -741,6 +740,347 @@ class _SongBookPageState extends State<SongBookPage> {
     ));
   }
 
+  // ════════════════════════════════
+  // EXPORTAR — guarda en Descargas
+  // ════════════════════════════════
+  Future<void> _exportSongs() async {
+    if (songs.isEmpty) {
+      _showSnack('⚠ No hay canciones para exportar');
+      return;
+    }
+    setState(() => _isExporting = true);
+    try {
+      final now = DateTime.now();
+      final timestamp = "${now.year}${now.month.toString().padLeft(2,'0')}${now.day.toString().padLeft(2,'0')}_${now.hour.toString().padLeft(2,'0')}${now.minute.toString().padLeft(2,'0')}";
+      final fileName = 'acoustic_songbook_$timestamp.json';
+
+      final exportData = {
+        'version': 1,
+        'exported_at': now.toIso8601String(),
+        'song_count': songs.length,
+        'songs': songs.map((s) => s.toJson()).toList(),
+      };
+      final jsonString = const JsonEncoder.withIndent('  ').convert(exportData);
+
+      // Intentar guardar en /storage/emulated/0/Download (Android)
+      bool savedToDownloads = false;
+      try {
+        // Pedir permiso en Android < 13
+        if (Platform.isAndroid) {
+          final status = await Permission.storage.request();
+          if (status.isGranted || await Permission.manageExternalStorage.isGranted) {
+            final downloadsDir = Directory('/storage/emulated/0/Download');
+            if (await downloadsDir.exists()) {
+              final file = File('${downloadsDir.path}/$fileName');
+              await file.writeAsString(jsonString, encoding: utf8);
+              savedToDownloads = true;
+              _showSnack('✓ Guardado en Descargas: $fileName');
+            }
+          }
+        }
+      } catch (_) {}
+
+      // Si no se pudo guardar en Descargas, usar share sheet como fallback
+      if (!savedToDownloads) {
+        final dir = await getTemporaryDirectory();
+        final file = File('${dir.path}/$fileName');
+        await file.writeAsString(jsonString, encoding: utf8);
+        await Share.shareXFiles(
+          [XFile(file.path, mimeType: 'application/json')],
+          subject: 'Acoustic Guitar – Song Book Backup',
+          text: '🎸 Backup de ${songs.length} canciones',
+        );
+        _showSnack('✓ ${songs.length} canciones exportadas');
+      }
+    } catch (e) {
+      _showSnack('Error al exportar: $e');
+    } finally {
+      setState(() => _isExporting = false);
+    }
+  }
+
+  // ════════════════════════════════
+  // IMPORTAR — lee desde Descargas
+  // ════════════════════════════════
+  Future<void> _importSongs() async {
+    setState(() => _isImporting = true);
+    try {
+      List<FileSystemEntity> backupFiles = [];
+
+      // Buscar archivos de backup en Descargas
+      if (Platform.isAndroid) {
+        final status = await Permission.storage.request();
+        final downloadsDir = Directory('/storage/emulated/0/Download');
+        if (await downloadsDir.exists()) {
+          backupFiles = downloadsDir
+              .listSync()
+              .where((f) =>
+                  f is File &&
+                  f.path.contains('acoustic_songbook') &&
+                  f.path.endsWith('.json'))
+              .toList()
+            ..sort((a, b) => b.path.compareTo(a.path)); // más reciente primero
+        }
+      }
+
+      setState(() => _isImporting = false);
+
+      if (!mounted) return;
+
+      if (backupFiles.isEmpty) {
+        // No hay archivos — mostrar instrucciones
+        _showNoBackupDialog();
+      } else {
+        // Mostrar lista de backups encontrados
+        _showBackupFileList(backupFiles.cast<File>());
+      }
+    } catch (e) {
+      setState(() => _isImporting = false);
+      _showSnack('Error: $e');
+    }
+  }
+
+  void _showNoBackupDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF161616),
+        shape: RoundedRectangleBorder(
+          side: const BorderSide(color: Color(0xFF2A2A2A)),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        title: const Text("Sin backups",
+          style: TextStyle(color: Color(0xFFE8C547), fontSize: 14, letterSpacing: 1)),
+        content: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text("No se encontró ningún archivo\nacoustic_songbook_*.json\nen tu carpeta Descargas.",
+            style: TextStyle(color: Colors.grey[500], fontSize: 12, height: 1.5)),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF111111),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              "1. Exporta primero desde otro dispositivo\n"
+              "2. Copia el archivo .json a tu carpeta Descargas\n"
+              "3. Vuelve a intentar importar",
+              style: TextStyle(color: Colors.grey[600], fontSize: 10, height: 1.6),
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Entendido", style: TextStyle(color: Color(0xFFE8C547))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showBackupFileList(List<File> files) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161616),
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: Color(0xFF2A2A2A)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+        child: Column(mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.folder_open, color: Color(0xFFC4893A), size: 16),
+            const SizedBox(width: 8),
+            const Text("BACKUPS ENCONTRADOS",
+              style: TextStyle(color: Color(0xFFC4893A), fontSize: 12,
+                fontWeight: FontWeight.bold, letterSpacing: 2)),
+            const Spacer(),
+            GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: const Icon(Icons.close, color: Color(0xFF7A7568), size: 18)),
+          ]),
+          const SizedBox(height: 4),
+          Text("en carpeta Descargas",
+            style: TextStyle(color: Colors.grey[700], fontSize: 10, letterSpacing: 1)),
+          const SizedBox(height: 14),
+          ...files.map((file) {
+            final name = file.path.split('/').last;
+            final stat = file.statSync();
+            final modified = stat.modified;
+            final dateStr = "${modified.day.toString().padLeft(2,'0')}/"
+                "${modified.month.toString().padLeft(2,'0')}/"
+                "${modified.year}  "
+                "${modified.hour.toString().padLeft(2,'0')}:"
+                "${modified.minute.toString().padLeft(2,'0')}";
+            return GestureDetector(
+              onTap: () {
+                Navigator.pop(context);
+                _loadBackupFile(file);
+              },
+              child: Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A1A),
+                  border: Border.all(color: const Color(0x44C4893A)),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(children: [
+                  const Icon(Icons.description_outlined,
+                    color: Color(0xFFC4893A), size: 20),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(name, style: const TextStyle(
+                        color: Color(0xFFE8E0CC), fontSize: 12,
+                        fontFamily: 'monospace')),
+                      const SizedBox(height: 2),
+                      Text(dateStr, style: TextStyle(
+                        color: Colors.grey[600], fontSize: 10)),
+                    ])),
+                  const Icon(Icons.chevron_right,
+                    color: Color(0xFF7A7568), size: 18),
+                ]),
+              ),
+            );
+          }),
+        ]),
+      ),
+    );
+  }
+
+  void _loadBackupFile(File file) {
+    try {
+      final jsonString = file.readAsStringSync(encoding: utf8);
+      final Map<String, dynamic> data = jsonDecode(jsonString);
+      if (!data.containsKey('songs') || data['songs'] is! List) {
+        _showSnack('⚠ Archivo inválido o corrupto');
+        return;
+      }
+      final importedSongs = (data['songs'] as List)
+          .map((j) => Song.fromJson(j)).toList();
+      if (importedSongs.isEmpty) {
+        _showSnack('⚠ El backup no contiene canciones');
+        return;
+      }
+      _showImportDialog(importedSongs);
+    } catch (e) {
+      _showSnack('Error al leer el archivo: $e');
+    }
+  }
+
+  void _showImportDialog(List<Song> importedSongs) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: const Color(0xFF161616),
+        shape: RoundedRectangleBorder(
+          side: const BorderSide(color: Color(0xFF2A2A2A)),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        title: Row(children: [
+          const Text("⬇", style: TextStyle(fontSize: 18)),
+          const SizedBox(width: 8),
+          const Text("IMPORTAR", style: TextStyle(
+            color: Color(0xFFE8C547), fontSize: 14,
+            fontWeight: FontWeight.bold, letterSpacing: 2)),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text("Se encontraron ${importedSongs.length} canción(es).",
+            style: const TextStyle(color: Color(0xFFE8E0CC), fontSize: 13)),
+          const SizedBox(height: 8),
+          Text("Tienes ${songs.length} canción(es) actualmente.",
+            style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+          const SizedBox(height: 14),
+          const Text("¿Cómo importar?",
+            style: TextStyle(color: Color(0xFF7A7568), fontSize: 10, letterSpacing: 2)),
+          const SizedBox(height: 8),
+          // Opción 1: Combinar
+          GestureDetector(
+            onTap: () {
+              Navigator.pop(context);
+              _doImport(importedSongs, replace: false);
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              margin: const EdgeInsets.only(bottom: 6),
+              decoration: BoxDecoration(
+                color: const Color(0x1AE8C547),
+                border: Border.all(color: const Color(0x55E8C547)),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text("COMBINAR", style: TextStyle(
+                  color: Color(0xFFE8C547), fontSize: 12,
+                  fontWeight: FontWeight.bold, letterSpacing: 2)),
+                const SizedBox(height: 2),
+                Text("Agrega las canciones importadas a las existentes",
+                  style: TextStyle(color: Colors.grey[600], fontSize: 10)),
+              ]),
+            ),
+          ),
+          // Opción 2: Reemplazar
+          GestureDetector(
+            onTap: () {
+              Navigator.pop(context);
+              _doImport(importedSongs, replace: true);
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0x1AE05252),
+                border: Border.all(color: const Color(0x55E05252)),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text("REEMPLAZAR", style: TextStyle(
+                  color: Color(0xFFE05252), fontSize: 12,
+                  fontWeight: FontWeight.bold, letterSpacing: 2)),
+                const SizedBox(height: 2),
+                Text("Borra las canciones actuales y carga las importadas",
+                  style: TextStyle(color: Colors.grey[600], fontSize: 10)),
+              ]),
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancelar", style: TextStyle(color: Color(0xFF7A7568))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _doImport(List<Song> importedSongs, {required bool replace}) {
+    setState(() {
+      if (replace) {
+        songs = importedSongs;
+      } else {
+        // Combinar: evitar duplicados por ID
+        final existingIds = songs.map((s) => s.id).toSet();
+        final newSongs = importedSongs.where((s) => !existingIds.contains(s.id)).toList();
+        songs = [...songs, ...newSongs];
+        final skipped = importedSongs.length - newSongs.length;
+        if (skipped > 0) {
+          Future.delayed(const Duration(milliseconds: 300), () {
+            _showSnack('$skipped canción(es) ya existían y se omitieron');
+          });
+        }
+      }
+    });
+    _saveSongs();
+    _showSnack('✓ ${importedSongs.length} canciones importadas');
+  }
+
   List<Song> get filteredSongs => songs.where((s) {
     final mq = searchQuery.isEmpty || s.title.toLowerCase().contains(searchQuery.toLowerCase())
         || s.artist.toLowerCase().contains(searchQuery.toLowerCase());
@@ -762,6 +1102,39 @@ class _SongBookPageState extends State<SongBookPage> {
         title: const Text("♪ SONG BOOK",
           style: TextStyle(color: Color(0xFFE8C547), fontWeight: FontWeight.bold, letterSpacing: 3, fontSize: 16)),
         actions: [
+          // ── BOTÓN EXPORTAR/IMPORTAR ──
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: GestureDetector(
+              onTap: () => _showBackupMenu(),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  border: Border.all(color: const Color(0xFF2A2A2A)),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(
+                    Icons.sync_alt,
+                    color: (_isExporting || _isImporting)
+                        ? Colors.grey[600]!
+                        : const Color(0xFFC4893A),
+                    size: 14,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    "BACKUP",
+                    style: TextStyle(
+                      color: (_isExporting || _isImporting)
+                          ? Colors.grey[600]!
+                          : const Color(0xFFC4893A),
+                      fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 2),
+                  ),
+                ]),
+              ),
+            ),
+          ),
+          // ── BOTÓN NUEVA CANCIÓN ──
           Padding(
             padding: const EdgeInsets.only(right: 10),
             child: GestureDetector(
@@ -772,7 +1145,8 @@ class _SongBookPageState extends State<SongBookPage> {
                   color: const Color(0xFFE8C547),
                   borderRadius: BorderRadius.circular(4),
                 ),
-                child: const Center(child: Text("+", style: TextStyle(color: Color(0xFF0D0D0D), fontSize: 22, fontWeight: FontWeight.bold))),
+                child: const Center(child: Text("+",
+                  style: TextStyle(color: Color(0xFF0D0D0D), fontSize: 22, fontWeight: FontWeight.bold))),
               ),
             ),
           ),
@@ -858,6 +1232,135 @@ class _SongBookPageState extends State<SongBookPage> {
     );
   }
 
+  // ════════════════════════════════
+  // MENÚ BACKUP (bottom sheet)
+  // ════════════════════════════════
+  void _showBackupMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161616),
+      shape: const RoundedRectangleBorder(
+        side: BorderSide(color: Color(0xFF2A2A2A)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Header
+          Row(children: [
+            const Icon(Icons.sync_alt, color: Color(0xFFC4893A), size: 16),
+            const SizedBox(width: 8),
+            const Text("BACKUP DE CANCIONES",
+              style: TextStyle(color: Color(0xFFC4893A), fontSize: 12,
+                fontWeight: FontWeight.bold, letterSpacing: 2)),
+            const Spacer(),
+            GestureDetector(
+              onTap: () => Navigator.pop(context),
+              child: const Icon(Icons.close, color: Color(0xFF7A7568), size: 18),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          Text("${songs.length} canción(es) guardadas actualmente",
+            style: TextStyle(color: Colors.grey[600], fontSize: 11)),
+          const SizedBox(height: 20),
+
+          // ── EXPORTAR ──
+          GestureDetector(
+            onTap: () {
+              Navigator.pop(context);
+              _exportSongs();
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                border: Border.all(color: const Color(0x55E8C547)),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(children: [
+                Container(
+                  width: 40, height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0x22E8C547),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Center(child: Icon(Icons.upload_file, color: Color(0xFFE8C547), size: 20)),
+                ),
+                const SizedBox(width: 14),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text("EXPORTAR",
+                    style: TextStyle(color: Color(0xFFE8C547), fontSize: 13,
+                      fontWeight: FontWeight.bold, letterSpacing: 2)),
+                  const SizedBox(height: 2),
+                  Text("Guarda tus canciones como archivo .json\nCompartir por WhatsApp, Drive, correo...",
+                    style: TextStyle(color: Colors.grey[600], fontSize: 11, height: 1.4)),
+                ])),
+                const Icon(Icons.chevron_right, color: Color(0xFF7A7568), size: 18),
+              ]),
+            ),
+          ),
+
+          // ── IMPORTAR ──
+          GestureDetector(
+            onTap: () {
+              Navigator.pop(context);
+              _importSongs();
+            },
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1A1A),
+                border: Border.all(color: const Color(0x55C4893A)),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(children: [
+                Container(
+                  width: 40, height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0x22C4893A),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Center(child: Icon(Icons.download_for_offline_outlined, color: Color(0xFFC4893A), size: 20)),
+                ),
+                const SizedBox(width: 14),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text("IMPORTAR",
+                    style: TextStyle(color: Color(0xFFC4893A), fontSize: 13,
+                      fontWeight: FontWeight.bold, letterSpacing: 2)),
+                  const SizedBox(height: 2),
+                  Text("Carga un archivo .json exportado previamente\nCombinar o reemplazar canciones actuales",
+                    style: TextStyle(color: Colors.grey[600], fontSize: 11, height: 1.4)),
+                ])),
+                const Icon(Icons.chevron_right, color: Color(0xFF7A7568), size: 18),
+              ]),
+            ),
+          ),
+
+          const SizedBox(height: 14),
+          // Info tip
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF111111),
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Row(children: [
+              const Icon(Icons.info_outline, color: Color(0xFF7A7568), size: 12),
+              const SizedBox(width: 8),
+              Expanded(child: Text(
+                "El backup incluye todas tus canciones, secciones, acordes y letra. Úsalo antes de desinstalar la app.",
+                style: TextStyle(color: Colors.grey[700], fontSize: 10, height: 1.4),
+              )),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
   Widget _songCard(Song song, bool isExpanded) {
     final totalChords = {...song.sections.expand((s) => s.chords)}.toList();
     return GestureDetector(
@@ -871,7 +1374,6 @@ class _SongBookPageState extends State<SongBookPage> {
           borderRadius: BorderRadius.circular(4),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // Left accent bar + header
           IntrinsicHeight(
             child: Row(children: [
               AnimatedContainer(
@@ -885,7 +1387,6 @@ class _SongBookPageState extends State<SongBookPage> {
               Expanded(child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(children: [
-                  // Tone badge
                   Container(
                     width: 40, height: 40,
                     decoration: BoxDecoration(
@@ -897,7 +1398,6 @@ class _SongBookPageState extends State<SongBookPage> {
                       style: const TextStyle(color: Color(0xFFE8C547), fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 1))),
                   ),
                   const SizedBox(width: 14),
-                  // Info
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text(song.title, style: const TextStyle(color: Color(0xFFE8E0CC), fontSize: 16, fontWeight: FontWeight.w400),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -911,7 +1411,6 @@ class _SongBookPageState extends State<SongBookPage> {
                       if (totalChords.isNotEmpty) _metaTag("${totalChords.length} acordes"),
                     ]),
                   ])),
-                  // Actions
                   Column(children: [
                     _actionBtn(Icons.edit_outlined, const Color(0xFFE8C547), () => _openForm(song)),
                     const SizedBox(height: 4),
@@ -921,7 +1420,6 @@ class _SongBookPageState extends State<SongBookPage> {
               )),
             ]),
           ),
-          // Expanded sections
           if (isExpanded && song.sections.isNotEmpty) ...[
             Container(height: 1, color: const Color(0xFF2A2A2A)),
             Padding(
@@ -1039,7 +1537,7 @@ class _SongFormPageState extends State<SongFormPage> {
   final _artistCtrl = TextEditingController();
   final _bpmCtrl    = TextEditingController();
   String selectedTone = 'C';
-  bool   selectedMinor = false;   // ← NUEVO
+  bool   selectedMinor = false;
   List<SongSection> sections = [];
 
   @override
@@ -1051,7 +1549,7 @@ class _SongFormPageState extends State<SongFormPage> {
       _artistCtrl.text = s.artist;
       _bpmCtrl.text    = s.bpm;
       selectedTone     = s.tone;
-      selectedMinor    = s.isMinor;   // ← NUEVO
+      selectedMinor    = s.isMinor;
       sections = s.sections.map((sec) => SongSection(name: sec.name, chords: List.from(sec.chords), lyrics: sec.lyrics)).toList();
     }
   }
@@ -1119,22 +1617,16 @@ class _SongFormPageState extends State<SongFormPage> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-
-          // Título y artista
           _fieldLabel("Título"),
           _textField(_titleCtrl, "Nombre de la canción"),
           const SizedBox(height: 12),
           _fieldLabel("Artista / Banda"),
           _textField(_artistCtrl, "Opcional"),
           const SizedBox(height: 12),
-
-          // Tonalidad
           _fieldLabel("Tonalidad"),
           const SizedBox(height: 6),
           _toneGrid(),
           const SizedBox(height: 10),
-
-          // Toggle Mayor / Menor
           Container(
             decoration: BoxDecoration(
               color: const Color(0xFF1A1A1A),
@@ -1173,21 +1665,15 @@ class _SongFormPageState extends State<SongFormPage> {
             ]),
           ),
           const SizedBox(height: 12),
-
-          // BPM
           _fieldLabel("BPM"),
           _textField(_bpmCtrl, "Ej: 120", keyboardType: TextInputType.number),
           const SizedBox(height: 20),
-
-          // Secciones
           Row(children: [
             Text("ESTRUCTURA", style: TextStyle(color: Colors.grey[600], fontSize: 9, letterSpacing: 3)),
             const SizedBox(width: 8),
             Expanded(child: Container(height: 1, color: const Color(0xFF2A2A2A))),
           ]),
           const SizedBox(height: 10),
-
-          // Quick add buttons
           Wrap(spacing: 6, runSpacing: 6,
             children: ['Intro','Verso','Precoro','Coro','Puente','Outro'].map((name) =>
               GestureDetector(
@@ -1202,11 +1688,7 @@ class _SongFormPageState extends State<SongFormPage> {
             ).toList(),
           ),
           const SizedBox(height: 10),
-
-          // Section blocks
           ...List.generate(sections.length, (i) => _sectionBlock(i)),
-
-          // Add custom section
           GestureDetector(
             onTap: () => _addSection(''),
             child: Container(
@@ -1219,8 +1701,6 @@ class _SongFormPageState extends State<SongFormPage> {
             ),
           ),
           const SizedBox(height: 20),
-
-          // Save button
           GestureDetector(
             onTap: _save,
             child: Container(
@@ -1249,7 +1729,6 @@ class _SongFormPageState extends State<SongFormPage> {
       decoration: BoxDecoration(color: const Color(0xFF161616),
         border: Border.all(color: const Color(0xFF2A2A2A)), borderRadius: BorderRadius.circular(3)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Header
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: const BoxDecoration(color: Color(0x0AE8C547),
@@ -1272,12 +1751,9 @@ class _SongFormPageState extends State<SongFormPage> {
             ),
           ]),
         ),
-
-        // Chord pills
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // Added chords
             if (sec.chords.isNotEmpty) Wrap(
               spacing: 4, runSpacing: 4,
               children: List.generate(sec.chords.length, (ci) {
@@ -1301,8 +1777,6 @@ class _SongFormPageState extends State<SongFormPage> {
               }),
             ),
             const SizedBox(height: 8),
-
-            // Scale chord picker
             Text("ESCALA $modeLabel DE $selectedTone", style: TextStyle(color: Colors.grey[700], fontSize: 8, letterSpacing: 2)),
             const SizedBox(height: 5),
             Wrap(
@@ -1324,8 +1798,6 @@ class _SongFormPageState extends State<SongFormPage> {
               }).toList(),
             ),
             const SizedBox(height: 8),
-
-            // Free chord input
             TextField(
               style: const TextStyle(color: Color(0xFFF0ECE0), fontSize: 12, fontFamily: 'monospace', letterSpacing: 1),
               decoration: InputDecoration(
@@ -1342,8 +1814,6 @@ class _SongFormPageState extends State<SongFormPage> {
               },
             ),
             const SizedBox(height: 10),
-
-            // Lyrics
             TextField(
               controller: TextEditingController(text: sec.lyrics),
               style: const TextStyle(color: Color(0xFFA09880), fontSize: 13, fontStyle: FontStyle.italic, height: 1.6),
