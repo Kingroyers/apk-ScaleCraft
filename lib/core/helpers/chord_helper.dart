@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../../models/song_section.dart';
 import '../constants.dart';
 
 String sufijoTipo(String tipo) {
@@ -40,34 +39,38 @@ Map<String,String>? parsearAcorde(String token) {
   if (cal == "°" || cal == "dim") tipo = "dim";
   return {"nota": nota, "tipo": tipo};
 }
-
-List<SongSection> getSectionsFromRawText(String text) {
-    List<SongSection> sections = [];
-    List<String> lines = text.split('\n');
     
-    String currentSectionTitle = "General";
-    List<String> currentLines = [];
 
-    final sectionRegExp = RegExp(r'^\[(Intro|Verso|Coro|Bridge|Solo|Outro|Fin).*\]$', caseSensitive: false);
-
-    for (var line in lines) {
-      if (sectionRegExp.hasMatch(line.trim())) {
-        // Guardar sección anterior si existe
-        if (currentLines.isNotEmpty) {
-          sections.add(SongSection(title: currentSectionTitle, rawContent: currentLines.join('\n')));
-          currentLines = [];
-        }
-        currentSectionTitle = line.trim().replaceAll('[', '').replaceAll(']', '');
-      } else {
-        currentLines.add(line);
-      }
-    }
-    
-    // Agregar la última sección
-    if (currentLines.isNotEmpty) {
-      sections.add(SongSection(title: currentSectionTitle, rawContent: currentLines.join('\n')));
-    }
-    
-    return sections;
+    // Acordes más comunes en canciones de iglesia
+  const List<String> commonChords = [
+    'C', 'Cm', 'C7', 'Cmaj7',
+    'D', 'Dm', 'D7',
+    'E', 'Em', 'E7',
+    'F', 'Fm', 'F7',
+    'G', 'Gm', 'G7',
+    'A', 'Am', 'A7',
+    'B', 'Bm', 'B7',
+    'C#', 'C#m', 'Db',
+    'Eb', 'Ebm',
+    'F#', 'F#m',
+    'Ab', 'Abm',
+    'Bb', 'Bbm',
+  ];
+ 
+  // Valida si un string es un acorde reconocido
+  bool isValidChord(String input) {
+    return RegExp(
+      r'^[A-G][#b]?(m|maj|dim|aug|sus|add)?[0-9]?$',
+    ).hasMatch(input.trim());
   }
+ 
+  // Acordes del picker agrupados por tipo
+  const Map<String, List<String>> pickerGroups = {
+    'Mayor': ['C', 'D', 'E', 'F', 'G', 'A', 'B'],
+    'Menor': ['Cm', 'Dm', 'Em', 'Fm', 'Gm', 'Am', 'Bm'],
+    '7ma': ['C7', 'D7', 'E7', 'F7', 'G7', 'A7', 'B7'],
+    'Especiales': ['Cmaj7', 'Gmaj7', 'Fmaj7', 'Dmaj7', 'Cadd9', 'Gadd9'],
+    '#/b': ['C#', 'C#m', 'Bb', 'Bbm', 'Eb', 'Ebm', 'Ab', 'Abm', 'F#', 'F#m'],
+  };
+  
 
