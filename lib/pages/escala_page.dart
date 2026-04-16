@@ -158,7 +158,7 @@ class _EscalaPageState extends State<EscalaPage> {
           Padding(
             padding: const EdgeInsets.only(right: 10),
             child: GestureDetector(
-              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SongBookPage())),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SongbookPage())),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
