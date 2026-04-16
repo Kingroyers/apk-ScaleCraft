@@ -1,26 +1,32 @@
+import 'chorded_line.dart';
+
 class SongSection {
-  String title; // Cambiado de 'name' a 'title' para consistencia
-  List<String> chords;
-  String lyrics;
+  final String name; // "Verso 1", "Coro", "Puente"
+  final List<ChordedLine> lines;
 
-  SongSection({
-    required this.title, 
-    List<String>? chords, 
-    this.lyrics = '', required String rawContent
-  }) : chords = chords ?? [];
+  const SongSection({
+    required this.name,
+    this.lines = const [],
+  });
 
-  // Actualiza también el JSON
+  SongSection copyWith({String? name, List<ChordedLine>? lines}) {
+    return SongSection(
+      name: name ?? this.name,
+      lines: lines ?? this.lines,
+    );
+  }
+
+  factory SongSection.fromJson(Map<String, dynamic> json) {
+    return SongSection(
+      name: json['name'] as String,
+      lines: (json['lines'] as List<dynamic>? ?? [])
+          .map((l) => ChordedLine.fromJson(l as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
   Map<String, dynamic> toJson() => {
-    'title': title, 
-    'chords': chords, 
-    'lyrics': lyrics
-  };
-
-  factory SongSection.fromJson(Map<String, dynamic> j) => SongSection(
-    title: j['title'] ?? j['name'] ?? '', // Soporta ambos por si acaso
-    chords: List<String>.from(j['chords'] ?? []), 
-    lyrics: j['lyrics'] ?? '', rawContent: j['rawContent'] ?? ''
-  );
-
-  String? get rawContent => null;
+        'name': name,
+        'lines': lines.map((l) => l.toJson()).toList(),
+      };
 }
